@@ -1,95 +1,152 @@
-// @ts-expect-error no types available
-import { MessageBuilder, Webhook } from "minimal-discord-webhook-node";
-import RssFeedEmitter from "rss-feed-emitter";
 import "dotenv/config";
 import { decode } from "html-entities";
+// @ts-expect-error The package does not expose its bundled declarations through `exports`.
+import webhookPackage from "minimal-discord-webhook-node";
+import RssFeedEmitter from "rss-feed-emitter";
 
-/** List of required environment variables */
-const requiredEnvVars = [
+declare const process: {
+    env: Record<string, string | undefined>;
+    exit: (code?: number) => never;
+};
+
+/** Runtime limits that preserve the service's existing polling and filtering behavior. */
+const MAX_POST_AGE_MS = 12 * 60 * 60 * 1000;
+const DISCORD_DESCRIPTION_LIMIT = 4096;
+const REFRESH_INTERVAL_MS = 60_000;
+
+/** Environment variables required to configure the feed and Discord webhook. */
+const REQUIRED_ENV_VARS = [
     "WebhookUrl",
     "WebhookUsername",
     "WebhookAvatar",
     "EmbedAuthorImageUrl",
     "RssUrl",
     "RssName",
-];
+] as const;
 
-/**
- * Checks if all required environment variables are set.
- * @throws Error If any required variable is missing.
- */
-const checkRequiredEnvVars = () => {
-    const missingVars = requiredEnvVars.filter((varName) => !process.env[varName]);
-    if (missingVars.length) {
-        throw new Error(`Missing environment variables: ${missingVars.join(", ")}`);
-    }
+/** Fields from a parsed Reddit feed entry that are used to build a notification. */
+interface FeedItem {
+    author?: string;
+    description?: string;
+    guid?: string;
+    image?: { url?: string };
+    link?: string;
+    pubdate?: Date | string;
+    title?: string;
+}
+
+/** Restores the inherited event API omitted by rss-feed-emitter's declarations. */
+interface TypedFeedEmitter extends RssFeedEmitter {
+    on: (eventName: string, listener: (value: unknown) => void) => this;
+}
+
+/** Runtime API exposed by minimal-discord-webhook-node's message builder. */
+interface MessageBuilderInstance {
+    setColor: (color: string) => this;
+    setDescription: (description: string) => this;
+    setFooter: (text: string, iconUrl?: string) => this;
+    setThumbnail: (url: string) => this;
+    setTitle: (title: string) => this;
+    setURL: (url: string) => this;
+}
+
+/** Runtime API exposed by minimal-discord-webhook-node's webhook client. */
+interface WebhookInstance {
+    send: (message: MessageBuilderInstance) => Promise<void>;
+    setAvatar: (url: string) => this;
+    setUsername: (username: string) => this;
+}
+
+const { MessageBuilder, Webhook } = webhookPackage as {
+    MessageBuilder: new () => MessageBuilderInstance;
+    Webhook: new (url: string) => WebhookInstance;
 };
 
-// Check environment variables and exit if any are missing
+/** Loads all configuration at startup and reports missing values together. */
+const getEnvironment = (): Record<(typeof REQUIRED_ENV_VARS)[number], string> => {
+    const missingVariables = REQUIRED_ENV_VARS.filter((name) => !process.env[name]?.trim());
+    if (missingVariables.length > 0) {
+        throw new Error(`Missing environment variables: ${missingVariables.join(", ")}`);
+    }
+
+    return Object.fromEntries(
+        REQUIRED_ENV_VARS.map((name) => [name, process.env[name]?.trim()])
+    ) as Record<(typeof REQUIRED_ENV_VARS)[number], string>;
+};
+
+let environment: ReturnType<typeof getEnvironment>;
 try {
-    checkRequiredEnvVars();
+    environment = getEnvironment();
 } catch (error) {
-    console.error(error);
+    console.error(error instanceof Error ? error.message : error);
     process.exit(1);
 }
 
-// Initialize Discord webhook
-const hook = new Webhook(process.env.WebhookUrl!)
-    .setUsername(process.env.WebhookUsername!)
-    .setAvatar(process.env.WebhookAvatar!);
+const hook = new Webhook(environment.WebhookUrl)
+    .setUsername(environment.WebhookUsername)
+    .setAvatar(environment.WebhookAvatar);
 
-/**
- * Sets up and monitors an RSS feed.
- */
-const setupFeed = () => {
-    try {
-        const feeder = new RssFeedEmitter({ skipFirstLoad: true });
-        feeder.on("error", console.error);
-        feeder.add({
-            eventName: process.env.RssName!,
-            refresh: 60_000,
-            url: process.env.RssUrl!,
-        });
+/** Converts the Reddit HTML excerpt into a Discord-safe description. */
+const extractDescription = (item: FeedItem): string | undefined => {
+    const parts: string[] = [];
+    const imageUrl = item.image?.url;
 
-        feeder.on("AirReps", async (res) => {
-            // Ignore posts older than 12 hours
-            if ((Date.now() - new Date(res.pubDate).getTime()) / 3_600_000 > 12) {
-                return;
-            }
-            await processWebhook(res);
-        });
-
-        console.log("RSS feed monitoring started...");
-    } catch (error) {
-        console.error("Error setting up RSS feed:", error);
-        setTimeout(setupFeed, 10_000);
+    if (imageUrl && item.guid) {
+        const postId = item.guid.replace(/^t\d_/, "");
+        parts.push(`[**Image**](https://www.reddit.com/gallery/${postId})`);
     }
+
+    const markdown = item.description?.match(/<div class="md">([\s\S]*?)<\/div>/)?.[1];
+    if (markdown) {
+        const text = decode(
+            markdown
+                .replace(/<br\s*\/?>/gi, "\n")
+                .replace(/<\/p>/gi, "\n\n")
+                .replace(/<[^>]*>/g, "")
+                .trim()
+        );
+
+        if (text) {
+            parts.push(text);
+        }
+    }
+
+    const description = parts.join("\n");
+    if (!description) {
+        return undefined;
+    }
+
+    // Discord rejects an entire webhook when an embed description exceeds 4096 characters.
+    return description.length <= DISCORD_DESCRIPTION_LIMIT
+        ? description
+        : `${description.slice(0, DISCORD_DESCRIPTION_LIMIT - 1).trimEnd()}…`;
 };
 
-/**
- * Processes the RSS feed item and sends a Discord webhook.
- * @async
- * @param res - The RSS feed item.
- */
-const processWebhook = async (res: {
-    description: string;
-    title: string;
-    link: string;
-    author: string;
-    image: { url?: string };
-    guid: string;
-}) => {
-    const extractedText = extractTextFromDescription(res);
-    if (!extractedText) {
+/** Rejects old entries while allowing entries whose feed timestamp is missing or malformed. */
+const isRecentPost = (publishedAt: FeedItem["pubdate"]): boolean => {
+    if (!publishedAt) {
+        return true;
+    }
+
+    const timestamp = new Date(publishedAt).getTime();
+    return Number.isNaN(timestamp) || Date.now() - timestamp <= MAX_POST_AGE_MS;
+};
+
+/** Builds and sends one Discord embed for a complete Reddit feed entry. */
+const sendWebhook = async (item: FeedItem): Promise<void> => {
+    const description = extractDescription(item);
+    if (!(description && item.title && item.link)) {
         return;
     }
-    const embed = new MessageBuilder()
-        .setTitle(res.title)
-        .setURL(res.link)
+
+    const embed = new MessageBuilder();
+    embed
+        .setTitle(item.title.slice(0, 256))
+        .setURL(item.link)
         .setColor("#FF4500")
-        .setDescription(extractedText.join("\n"))
+        .setDescription(description)
         .setFooter(
-            `${res.author} | ${new Date().toLocaleString("en-US", {
+            `${item.author ?? "Unknown author"} | ${new Date().toLocaleString("en-US", {
                 day: "numeric",
                 hour: "numeric",
                 hour12: true,
@@ -97,52 +154,47 @@ const processWebhook = async (res: {
                 month: "long",
                 year: "numeric",
             })}`,
-            process.env.EmbedAuthorImageUrl!
+            environment.EmbedAuthorImageUrl
         );
 
-    if (res.image.url) {
-        embed.setThumbnail(res.image.url);
+    if (item.image?.url) {
+        embed.setThumbnail(item.image.url);
     }
 
-    try {
-        await hook.send(embed);
-    } catch (error) {
-        console.error("Error sending Discord webhook:", error);
-    }
+    await hook.send(embed);
+    console.log(`Sent: ${item.title}`);
 };
 
-/**
- * Extracts text content from the RSS feed item description.
- * @param {Object} res - The RSS feed item.
- * @returns {string[] | null} Array of an extracted text or null if no content.
- */
-const extractTextFromDescription = (res: {
-    description: string;
-    image: { url?: string };
-    guid: string;
-}): string[] | null => {
-    const arr: string[] = [];
+/** Starts the feed listener without replaying entries returned by its initial request. */
+const setupFeed = (): void => {
+    const feeder = new RssFeedEmitter({ skipFirstLoad: true }) as TypedFeedEmitter;
 
-    // Add an image link if present
-    if (res.image.url) {
-        arr.push(`[**Image**](https://www.reddit.com/gallery/${res.guid.replace(/^t\d_/, "")})`);
-    }
+    feeder.on("error", (error) => {
+        console.error("RSS feed error:", error);
+    });
+    feeder.on(environment.RssName, (value) => {
+        const item = value as FeedItem;
+        if (!isRecentPost(item.pubdate)) {
+            return;
+        }
 
-    // Extract and decode text content
-    const mdMatch = res.description.match(/<div class="md">([\s\S]*?)<\/div>/);
-    if (mdMatch?.[1]) {
-        arr.push(
-            decode(
-                mdMatch[1]
-                    .replace(/<p>/g, "\n\n")
-                    .replace(/<[^>]*>/g, "")
-                    .trim()
-            )
-        );
-    }
+        sendWebhook(item).catch((error: unknown) => {
+            console.error("Error sending Discord webhook:", error);
+        });
+    });
 
-    return arr.length ? arr : null;
+    feeder.add({
+        eventName: environment.RssName,
+        refresh: REFRESH_INTERVAL_MS,
+        url: environment.RssUrl,
+    });
+
+    console.log(`Monitoring ${environment.RssName} every 60 seconds...`);
 };
 
-// Start the RSS feed monitoring
-setupFeed();
+try {
+    setupFeed();
+} catch (error) {
+    console.error("Error setting up RSS feed:", error);
+    process.exit(1);
+}
