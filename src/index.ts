@@ -1,5 +1,5 @@
+import { parseAtomFeed } from "feedsmith";
 import { decode } from "html-entities";
-import RssFeedEmitter from "rss-feed-emitter";
 
 declare const process: {
     arch: string;
@@ -18,8 +18,10 @@ type LogColor = readonly [number, number, number];
 const MAX_POST_AGE_MS = 12 * 60 * 60 * 1000;
 const DISCORD_DESCRIPTION_LIMIT = 4096;
 const DISCORD_EMBED_COLOR = 0xff_45_00;
+const FEED_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_WEBHOOK_ATTEMPTS = 3;
 const REFRESH_INTERVAL_MS = 60_000;
+const USER_AGENT = "RedditToDiscordNotifications feed monitor";
 
 /** Small ANSI logger inspired by the API service without its HTTP-specific presentation. */
 const RESET = "\x1b[0m";
@@ -86,11 +88,6 @@ interface FeedItem {
     link?: string;
     pubdate?: Date | string;
     title?: string;
-}
-
-/** Restores the inherited event API omitted by rss-feed-emitter's declarations. */
-interface TypedFeedEmitter extends RssFeedEmitter {
-    on: (eventName: string, listener: (value: unknown) => void) => this;
 }
 
 /** Loads all configuration at startup and reports missing values together. */
@@ -193,6 +190,49 @@ const isRecentPost = (publishedAt: FeedItem["pubdate"]): boolean => {
     return Number.isNaN(timestamp) || Date.now() - timestamp <= MAX_POST_AGE_MS;
 };
 
+/** Converts Feedsmith's Atom entry shape into the fields used by the notifier. */
+const normalizeFeedItem = (
+    entry: NonNullable<ReturnType<typeof parseAtomFeed>["entries"]>[number]
+): FeedItem => {
+    const imageUrl = entry.media?.thumbnails?.[0]?.url;
+    const alternateLink = entry.links?.find((link) => !link.rel || link.rel === "alternate");
+
+    return {
+        author: entry.authors?.[0]?.name,
+        description: entry.content ?? entry.summary,
+        guid: entry.id,
+        image: imageUrl ? { url: imageUrl } : undefined,
+        link: alternateLink?.href ?? entry.links?.[0]?.href,
+        pubdate: entry.published ?? entry.updated,
+        title: entry.title,
+    };
+};
+
+/** Fetches and parses one Reddit Atom feed snapshot with a bounded request time. */
+const fetchFeed = async (): Promise<FeedItem[]> => {
+    const response = await fetch(environment.RssUrl, {
+        headers: {
+            Accept: "application/atom+xml, application/xml;q=0.9",
+            "User-Agent": USER_AGENT,
+        },
+        signal: AbortSignal.timeout(FEED_REQUEST_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+        throw new Error(
+            `Reddit returned ${response.status}: ${(await response.text()).slice(0, 500)}`
+        );
+    }
+
+    const feed = parseAtomFeed(await response.text());
+    return (feed.entries ?? []).map(normalizeFeedItem);
+};
+
+const getItemId = (item: FeedItem): string | undefined => item.guid ?? item.link;
+
+const collectItemIds = (items: FeedItem[]): Set<string> =>
+    new Set(items.map(getItemId).filter((itemId): itemId is string => itemId !== undefined));
+
 /** Builds and sends one Discord embed for a complete Reddit feed entry. */
 const sendWebhook = async (item: FeedItem): Promise<void> => {
     const description = extractDescription(item);
@@ -229,36 +269,48 @@ const sendWebhook = async (item: FeedItem): Promise<void> => {
     log.ok(item.title);
 };
 
-/** Starts the feed listener without replaying entries returned by its initial request. */
-const setupFeed = (): void => {
-    const feeder = new RssFeedEmitter({ skipFirstLoad: true }) as TypedFeedEmitter;
+let knownItemIds = new Set<string>();
 
-    feeder.on("error", (error) => {
-        log.error("RSS feed error", error);
-    });
-    feeder.on(environment.RssName, (value) => {
-        const item = value as FeedItem;
-        if (!isRecentPost(item.pubdate)) {
-            return;
+/** Sends newly observed entries oldest-first, preserving the feed's previous behavior. */
+const processNewItems = async (items: FeedItem[], previousItemIds: Set<string>): Promise<void> => {
+    for (const item of items.toReversed()) {
+        const itemId = getItemId(item);
+        if (!(itemId && !previousItemIds.has(itemId) && isRecentPost(item.pubdate))) {
+            continue;
         }
 
-        sendWebhook(item).catch((error: unknown) => {
+        try {
+            // biome-ignore lint/performance/noAwaitInLoops: Sequential delivery respects rate limits.
+            await sendWebhook(item);
+        } catch (error) {
             log.error("Discord webhook failed", error);
-        });
-    });
-
-    feeder.add({
-        eventName: environment.RssName,
-        refresh: REFRESH_INTERVAL_MS,
-        url: environment.RssUrl,
-    });
-
-    log.ready(environment.RssName);
+        }
+    }
 };
 
-try {
-    setupFeed();
-} catch (error) {
+/** Polls after each completed request so slow responses cannot create overlapping work. */
+const pollFeed = async (): Promise<void> => {
+    try {
+        const items = await fetchFeed();
+        const previousItemIds = knownItemIds;
+        knownItemIds = collectItemIds(items);
+        await processNewItems(items, previousItemIds);
+    } catch (error) {
+        log.error("RSS feed error", error);
+    } finally {
+        setTimeout(pollFeed, REFRESH_INTERVAL_MS);
+    }
+};
+
+/** Seeds feed history before monitoring so startup never replays existing entries. */
+const setupFeed = async (): Promise<void> => {
+    const initialItems = await fetchFeed();
+    knownItemIds = collectItemIds(initialItems);
+    log.ready(environment.RssName);
+    setTimeout(pollFeed, REFRESH_INTERVAL_MS);
+};
+
+setupFeed().catch((error: unknown) => {
     log.error("Could not start RSS monitoring", error);
     process.exit(1);
-}
+});
