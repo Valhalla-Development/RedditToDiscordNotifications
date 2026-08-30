@@ -345,6 +345,9 @@ const sendWebhook = async (item: FeedItem): Promise<void> => {
 
 let knownItemIds = new Set<string>();
 
+const wait = (milliseconds: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 /** Sends newly observed entries oldest-first, preserving the feed's previous behavior. */
 const processNewItems = async (items: FeedItem[], previousItemIds: Set<string>): Promise<void> => {
     for (const item of items.toReversed()) {
@@ -378,13 +381,19 @@ const pollFeed = async (): Promise<void> => {
 
 /** Seeds feed history before monitoring so startup never replays existing entries. */
 const setupFeed = async (): Promise<void> => {
-    const initialItems = await fetchFeed();
-    knownItemIds = collectItemIds(initialItems);
-    log.ready(environment.RssName);
-    setTimeout(pollFeed, REFRESH_INTERVAL_MS);
+    try {
+        const initialItems = await fetchFeed();
+        knownItemIds = collectItemIds(initialItems);
+        log.ready(environment.RssName);
+        setTimeout(pollFeed, REFRESH_INTERVAL_MS);
+    } catch (error) {
+        log.error("Could not start RSS monitoring; retrying in 60 seconds", error);
+        await wait(REFRESH_INTERVAL_MS);
+        await setupFeed();
+    }
 };
 
 setupFeed().catch((error: unknown) => {
-    log.error("Could not start RSS monitoring", error);
+    log.error("RSS monitoring stopped unexpectedly", error);
     process.exit(1);
 });
