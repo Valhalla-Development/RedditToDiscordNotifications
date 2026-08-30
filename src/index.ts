@@ -5,14 +5,68 @@ import webhookPackage from "minimal-discord-webhook-node";
 import RssFeedEmitter from "rss-feed-emitter";
 
 declare const process: {
+    arch: string;
     env: Record<string, string | undefined>;
     exit: (code?: number) => never;
+    pid: number;
+    platform: string;
+    stdout: { isTTY?: boolean };
+    uptime: () => number;
+    versions: { bun?: string };
 };
+
+type LogColor = readonly [number, number, number];
 
 /** Runtime limits that preserve the service's existing polling and filtering behavior. */
 const MAX_POST_AGE_MS = 12 * 60 * 60 * 1000;
 const DISCORD_DESCRIPTION_LIMIT = 4096;
 const REFRESH_INTERVAL_MS = 60_000;
+
+/** Small ANSI logger inspired by the API service without its HTTP-specific presentation. */
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+const CYAN = [34, 211, 238] as const;
+const GREEN = [74, 222, 128] as const;
+const MAGENTA = [192, 132, 252] as const;
+const RED = [248, 113, 113] as const;
+const GRAY = [148, 163, 184] as const;
+const colorEnabled = process.stdout.isTTY !== false && process.env.NO_COLOR === undefined;
+
+const paint = (color: LogColor, text: string, bold = false): string => {
+    if (!colorEnabled) {
+        return text;
+    }
+    const [red, green, blue] = color;
+    return `${bold ? BOLD : ""}\x1b[38;2;${red};${green};${blue}m${text}${RESET}`;
+};
+
+const formatError = (cause: unknown): string =>
+    cause instanceof Error ? (cause.stack ?? cause.message) : String(cause);
+
+const log = {
+    error(message: string, cause?: unknown): void {
+        const detail = cause === undefined ? "" : `\n${paint(GRAY, formatError(cause))}`;
+        console.error(`${paint(RED, "◆ ERROR", true)} ${message}${detail}`);
+    },
+    ok(message: string): void {
+        console.log(`${paint(GREEN, "✦ SENT", true)} ${message}`);
+    },
+    ready(feedName: string): void {
+        const rule = paint(MAGENTA, "═".repeat(52), true);
+        const runtime = process.versions.bun ? `Bun ${process.versions.bun}` : "JavaScript";
+        console.log(`\n${rule}`);
+        console.log(paint(CYAN, "  REDDIT  →  DISCORD", true));
+        console.log(rule);
+        console.log(`${paint(MAGENTA, ">>", true)} Feed:     ${paint(CYAN, feedName, true)}`);
+        console.log(`${paint(GREEN, ">>", true)} Polling:  every 60 seconds`);
+        console.log(
+            `${paint(CYAN, ">>", true)} Runtime:  ${runtime} · ${process.platform} ${process.arch}`
+        );
+        console.log(`${paint(GRAY, ">>", true)} Process:  PID ${process.pid}`);
+        console.log(`${paint(MAGENTA, ">>", true)} Boot:     ${process.uptime().toFixed(2)}s`);
+        console.log(`${rule}\n`);
+    },
+};
 
 /** Environment variables required to configure the feed and Discord webhook. */
 const REQUIRED_ENV_VARS = [
@@ -78,7 +132,7 @@ let environment: ReturnType<typeof getEnvironment>;
 try {
     environment = getEnvironment();
 } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
+    log.error("Invalid configuration", error);
     process.exit(1);
 }
 
@@ -162,7 +216,7 @@ const sendWebhook = async (item: FeedItem): Promise<void> => {
     }
 
     await hook.send(embed);
-    console.log(`Sent: ${item.title}`);
+    log.ok(item.title);
 };
 
 /** Starts the feed listener without replaying entries returned by its initial request. */
@@ -170,7 +224,7 @@ const setupFeed = (): void => {
     const feeder = new RssFeedEmitter({ skipFirstLoad: true }) as TypedFeedEmitter;
 
     feeder.on("error", (error) => {
-        console.error("RSS feed error:", error);
+        log.error("RSS feed error", error);
     });
     feeder.on(environment.RssName, (value) => {
         const item = value as FeedItem;
@@ -179,7 +233,7 @@ const setupFeed = (): void => {
         }
 
         sendWebhook(item).catch((error: unknown) => {
-            console.error("Error sending Discord webhook:", error);
+            log.error("Discord webhook failed", error);
         });
     });
 
@@ -189,12 +243,12 @@ const setupFeed = (): void => {
         url: environment.RssUrl,
     });
 
-    console.log(`Monitoring ${environment.RssName} every 60 seconds...`);
+    log.ready(environment.RssName);
 };
 
 try {
     setupFeed();
 } catch (error) {
-    console.error("Error setting up RSS feed:", error);
+    log.error("Could not start RSS monitoring", error);
     process.exit(1);
 }
