@@ -14,10 +14,32 @@ declare const process: {
 
 type LogColor = readonly [number, number, number];
 
+interface DiscordTextDisplay {
+    content: string;
+    type: 10;
+}
+
+interface DiscordSeparator {
+    divider: boolean;
+    spacing: 1;
+    type: 14;
+}
+
+interface DiscordMediaGallery {
+    items: Array<{
+        description: string;
+        media: { url: string };
+    }>;
+    type: 12;
+}
+
+type DiscordContainerComponent = DiscordMediaGallery | DiscordSeparator | DiscordTextDisplay;
+
 /** Runtime limits that preserve the service's existing polling and filtering behavior. */
 const MAX_POST_AGE_MS = 12 * 60 * 60 * 1000;
-const DISCORD_DESCRIPTION_LIMIT = 4096;
-const DISCORD_EMBED_COLOR = 0xff_45_00;
+const DISCORD_COMPONENTS_V2_FLAG = 32_768;
+const DISCORD_TEXT_DISPLAY_LIMIT = 4000;
+const REDDIT_ORANGE = 0xff_45_00;
 const FEED_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_WEBHOOK_ATTEMPTS = 3;
 const REFRESH_INTERVAL_MS = 60_000;
@@ -74,7 +96,6 @@ const REQUIRED_ENV_VARS = [
     "WebhookUrl",
     "WebhookUsername",
     "WebhookAvatar",
-    "EmbedAuthorImageUrl",
     "RssUrl",
     "RssName",
 ] as const;
@@ -110,9 +131,12 @@ try {
     process.exit(1);
 }
 
+const webhookUrl = new URL(environment.WebhookUrl);
+webhookUrl.searchParams.set("with_components", "true");
+
 /** Posts a Discord payload and follows bounded server-provided rate-limit delays. */
 const postDiscordWebhook = async (payload: unknown, attempt = 1): Promise<void> => {
-    const response = await fetch(environment.WebhookUrl, {
+    const response = await fetch(webhookUrl, {
         body: JSON.stringify(payload),
         headers: { "Content-Type": "application/json" },
         method: "POST",
@@ -146,38 +170,42 @@ const postDiscordWebhook = async (payload: unknown, attempt = 1): Promise<void> 
 
 /** Converts the Reddit HTML excerpt into a Discord-safe description. */
 const extractDescription = (item: FeedItem): string | undefined => {
-    const parts: string[] = [];
-    const imageUrl = item.image?.url;
-
-    if (imageUrl && item.guid) {
-        const postId = item.guid.replace(/^t\d_/, "");
-        parts.push(`[**Image**](https://www.reddit.com/gallery/${postId})`);
-    }
-
     const markdown = item.description?.match(/<div class="md">([\s\S]*?)<\/div>/)?.[1];
-    if (markdown) {
-        const text = decode(
-            markdown
-                .replace(/<br\s*\/?>/gi, "\n")
-                .replace(/<\/p>/gi, "\n\n")
-                .replace(/<[^>]*>/g, "")
-                .trim()
-        );
-
-        if (text) {
-            parts.push(text);
-        }
+    if (!markdown) {
+        return undefined;
     }
 
-    const description = parts.join("\n");
+    const description = decode(
+        markdown
+            .replace(/<br\s*\/?>/gi, "\n")
+            .replace(/<\/p>/gi, "\n\n")
+            .replace(/<[^>]*>/g, "")
+            .trim()
+    );
     if (!description) {
         return undefined;
     }
 
-    // Discord rejects an entire webhook when an embed description exceeds 4096 characters.
-    return description.length <= DISCORD_DESCRIPTION_LIMIT
+    // Text displays reject content beyond Discord's per-component character limit.
+    return description.length <= DISCORD_TEXT_DISPLAY_LIMIT
         ? description
-        : `${description.slice(0, DISCORD_DESCRIPTION_LIMIT - 1).trimEnd()}…`;
+        : `${description.slice(0, DISCORD_TEXT_DISPLAY_LIMIT - 1).trimEnd()}…`;
+};
+
+const escapeMarkdownLinkText = (value: string): string => value.replace(/[\\[\]]/g, "\\$&");
+
+const formatPostDate = (publishedAt: FeedItem["pubdate"]): string => {
+    const parsedDate = publishedAt ? new Date(publishedAt) : new Date();
+    const date = Number.isNaN(parsedDate.getTime()) ? new Date() : parsedDate;
+
+    return date.toLocaleString("en-US", {
+        day: "numeric",
+        hour: "numeric",
+        hour12: true,
+        minute: "2-digit",
+        month: "long",
+        year: "numeric",
+    });
 };
 
 /** Rejects old entries while allowing entries whose feed timestamp is missing or malformed. */
@@ -233,35 +261,58 @@ const getItemId = (item: FeedItem): string | undefined => item.guid ?? item.link
 const collectItemIds = (items: FeedItem[]): Set<string> =>
     new Set(items.map(getItemId).filter((itemId): itemId is string => itemId !== undefined));
 
-/** Builds and sends one Discord embed for a complete Reddit feed entry. */
+/** Builds and sends one Components V2 notification for a complete Reddit feed entry. */
 const sendWebhook = async (item: FeedItem): Promise<void> => {
     const description = extractDescription(item);
-    if (!(description && item.title && item.link)) {
+    const imageUrl = item.image?.url;
+    if (!(item.title && item.link && (description || imageUrl))) {
         return;
     }
 
-    const embed = {
-        color: DISCORD_EMBED_COLOR,
-        description,
-        footer: {
-            icon_url: environment.EmbedAuthorImageUrl,
-            text: `${item.author ?? "Unknown author"} | ${new Date().toLocaleString("en-US", {
-                day: "numeric",
-                hour: "numeric",
-                hour12: true,
-                minute: "2-digit",
-                month: "long",
-                year: "numeric",
-            })}`,
+    const title = item.title.replace(/\s+/g, " ").trim().slice(0, 256);
+    const containerComponents: DiscordContainerComponent[] = [
+        {
+            content: `## [${escapeMarkdownLinkText(title)}](${item.link})`,
+            type: 10,
         },
-        thumbnail: item.image?.url ? { url: item.image.url } : undefined,
-        title: item.title.slice(0, 256),
-        url: item.link,
-    };
+        {
+            content: `-# Posted by ${item.author ?? "Unknown author"} • ${formatPostDate(item.pubdate)}`,
+            type: 10,
+        },
+        {
+            divider: true,
+            spacing: 1,
+            type: 14,
+        },
+    ];
+
+    if (description) {
+        containerComponents.push({ content: description, type: 10 });
+    }
+
+    if (imageUrl) {
+        containerComponents.push({
+            items: [
+                {
+                    description: title,
+                    media: { url: imageUrl },
+                },
+            ],
+            type: 12,
+        });
+    }
 
     const payload = {
+        allowed_mentions: { parse: [] },
         avatar_url: environment.WebhookAvatar,
-        embeds: [embed],
+        components: [
+            {
+                accent_color: REDDIT_ORANGE,
+                components: containerComponents,
+                type: 17,
+            },
+        ],
+        flags: DISCORD_COMPONENTS_V2_FLAG,
         username: environment.WebhookUsername,
     };
 

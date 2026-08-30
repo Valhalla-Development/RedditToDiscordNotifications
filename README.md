@@ -32,8 +32,8 @@ This project provides a seamless bridge between Reddit and Discord, automaticall
       <p>Monitor Reddit RSS feeds with 60-second refresh intervals for near real-time notifications.</p>
     </td>
     <td width="50%">
-      <h3>🎨 Rich Embeds</h3>
-      <p>Beautiful Discord embeds with post titles, content, images, and timestamps.</p>
+      <h3>🎨 Rich Components</h3>
+      <p>Structured Discord notifications with linked titles, content, media previews, and timestamps.</p>
     </td>
   </tr>
   <tr>
@@ -82,7 +82,6 @@ This project provides a seamless bridge between Reddit and Discord, automaticall
     WebhookUrl=your_discord_webhook_url
     WebhookUsername=desired_webhook_username
     WebhookAvatar=webhook_avatar_url
-    EmbedAuthorImageUrl=author_image_url
     RssUrl=reddit_rss_feed_url
     RssName=feed_name
     ```
