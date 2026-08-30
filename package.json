@@ -1,6 +1,6 @@
 {
   "name": "reddittodiscordnotifications",
-  "version": "1.0.31",
+  "version": "1.0.32",
   "description": "Automate sending Reddit RSS feed updates to your Discord server",
   "license": "GPL-3.0-or-later",
   "author": "Ragnar Lothbrok <ragnarlothbrokjr@proton.me>",
