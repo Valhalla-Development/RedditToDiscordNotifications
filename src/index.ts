@@ -25,15 +25,29 @@ interface DiscordSeparator {
     type: 14;
 }
 
+interface DiscordSection {
+    accessory: {
+        description?: string;
+        media: { url: string };
+        type: 11;
+    };
+    components: DiscordTextDisplay[];
+    type: 9;
+}
+
 interface DiscordMediaGallery {
     items: Array<{
-        description: string;
+        description?: string;
         media: { url: string };
     }>;
     type: 12;
 }
 
-type DiscordContainerComponent = DiscordMediaGallery | DiscordSeparator | DiscordTextDisplay;
+type DiscordContainerComponent =
+    | DiscordMediaGallery
+    | DiscordSection
+    | DiscordSeparator
+    | DiscordTextDisplay;
 
 /** Runtime limits that preserve the service's existing polling and filtering behavior. */
 const MAX_POST_AGE_MS = 12 * 60 * 60 * 1000;
@@ -96,6 +110,7 @@ const REQUIRED_ENV_VARS = [
     "WebhookUrl",
     "WebhookUsername",
     "WebhookAvatar",
+    "EmbedAuthorImageUrl",
     "RssUrl",
     "RssName",
 ] as const;
@@ -272,12 +287,21 @@ const sendWebhook = async (item: FeedItem): Promise<void> => {
     const title = item.title.replace(/\s+/g, " ").trim().slice(0, 256);
     const containerComponents: DiscordContainerComponent[] = [
         {
-            content: `## [${escapeMarkdownLinkText(title)}](${item.link})`,
-            type: 10,
-        },
-        {
-            content: `-# Posted by ${item.author ?? "Unknown author"} • ${formatPostDate(item.pubdate)}`,
-            type: 10,
+            accessory: {
+                media: { url: environment.EmbedAuthorImageUrl },
+                type: 11,
+            },
+            components: [
+                {
+                    content: `## [${escapeMarkdownLinkText(title)}](${item.link})`,
+                    type: 10,
+                },
+                {
+                    content: `-# Posted by ${item.author ?? "Unknown author"} • ${formatPostDate(item.pubdate)}`,
+                    type: 10,
+                },
+            ],
+            type: 9,
         },
         {
             divider: true,
@@ -294,7 +318,6 @@ const sendWebhook = async (item: FeedItem): Promise<void> => {
         containerComponents.push({
             items: [
                 {
-                    description: title,
                     media: { url: imageUrl },
                 },
             ],

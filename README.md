@@ -33,7 +33,7 @@ This project provides a seamless bridge between Reddit and Discord, automaticall
     </td>
     <td width="50%">
       <h3>🎨 Rich Components</h3>
-      <p>Structured Discord notifications with linked titles, content, media previews, and timestamps.</p>
+      <p>Structured Discord notifications with linked titles, author images, media previews, and timestamps.</p>
     </td>
   </tr>
   <tr>
@@ -82,6 +82,7 @@ This project provides a seamless bridge between Reddit and Discord, automaticall
     WebhookUrl=your_discord_webhook_url
     WebhookUsername=desired_webhook_username
     WebhookAvatar=webhook_avatar_url
+    EmbedAuthorImageUrl=small_top_right_image_url
     RssUrl=reddit_rss_feed_url
     RssName=feed_name
     ```
