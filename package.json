@@ -18,7 +18,6 @@
   },
   "dependencies": {
     "html-entities": "^2.6.0",
-    "minimal-discord-webhook-node": "^1.0.1",
     "rss-feed-emitter": "^3.2.4"
   },
   "devDependencies": {

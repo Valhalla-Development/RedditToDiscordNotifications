@@ -6,7 +6,6 @@
       "name": "reddittodiscordnotifications",
       "dependencies": {
         "html-entities": "^2.6.0",
-        "minimal-discord-webhook-node": "^1.0.1",
         "rss-feed-emitter": "^3.2.4",
       },
       "devDependencies": {
@@ -250,8 +249,6 @@
     "mime-types": ["mime-types@2.1.35", "", { "dependencies": { "mime-db": "1.52.0" } }, "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw=="],
 
     "mimic-function": ["mimic-function@5.0.1", "", {}, "sha512-VP79XUPxV2CigYP3jWwAUFSku2aKqBH7uTAapFWCBqutsbmDo96KY5o8uh6U+/YSIn5OxJnXp73beVkpqMIGhA=="],
-
-    "minimal-discord-webhook-node": ["minimal-discord-webhook-node@1.0.1", "", {}, "sha512-sizvEp4Z0OyLPOfB/1l/6NgDd5BG/v9xDwyIALgOH9gpe2ANstMCqMywf/yvn9QwdV4Kz5U/Il8+fS4n+tCGRw=="],
 
     "mlly": ["mlly@1.8.2", "", { "dependencies": { "acorn": "^8.16.0", "pathe": "^2.0.3", "pkg-types": "^1.3.1", "ufo": "^1.6.3" } }, "sha512-d+ObxMQFmbt10sretNDytwt85VrbkhhUA/JBGm1MPaWJ65Cl4wOgLaB1NYvJSZ0Ef03MMEU/0xpPMXUIQ29UfA=="],
 

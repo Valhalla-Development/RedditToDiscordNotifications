@@ -1,6 +1,4 @@
 import { decode } from "html-entities";
-// @ts-expect-error The package does not expose its bundled declarations through `exports`.
-import webhookPackage from "minimal-discord-webhook-node";
 import RssFeedEmitter from "rss-feed-emitter";
 
 declare const process: {
@@ -19,6 +17,8 @@ type LogColor = readonly [number, number, number];
 /** Runtime limits that preserve the service's existing polling and filtering behavior. */
 const MAX_POST_AGE_MS = 12 * 60 * 60 * 1000;
 const DISCORD_DESCRIPTION_LIMIT = 4096;
+const DISCORD_EMBED_COLOR = 0xff_45_00;
+const MAX_WEBHOOK_ATTEMPTS = 3;
 const REFRESH_INTERVAL_MS = 60_000;
 
 /** Small ANSI logger inspired by the API service without its HTTP-specific presentation. */
@@ -93,28 +93,6 @@ interface TypedFeedEmitter extends RssFeedEmitter {
     on: (eventName: string, listener: (value: unknown) => void) => this;
 }
 
-/** Runtime API exposed by minimal-discord-webhook-node's message builder. */
-interface MessageBuilderInstance {
-    setColor: (color: string) => this;
-    setDescription: (description: string) => this;
-    setFooter: (text: string, iconUrl?: string) => this;
-    setThumbnail: (url: string) => this;
-    setTitle: (title: string) => this;
-    setURL: (url: string) => this;
-}
-
-/** Runtime API exposed by minimal-discord-webhook-node's webhook client. */
-interface WebhookInstance {
-    send: (message: MessageBuilderInstance) => Promise<void>;
-    setAvatar: (url: string) => this;
-    setUsername: (username: string) => this;
-}
-
-const { MessageBuilder, Webhook } = webhookPackage as {
-    MessageBuilder: new () => MessageBuilderInstance;
-    Webhook: new (url: string) => WebhookInstance;
-};
-
 /** Loads all configuration at startup and reports missing values together. */
 const getEnvironment = (): Record<(typeof REQUIRED_ENV_VARS)[number], string> => {
     const missingVariables = REQUIRED_ENV_VARS.filter((name) => !process.env[name]?.trim());
@@ -135,9 +113,39 @@ try {
     process.exit(1);
 }
 
-const hook = new Webhook(environment.WebhookUrl)
-    .setUsername(environment.WebhookUsername)
-    .setAvatar(environment.WebhookAvatar);
+/** Posts a Discord payload and follows bounded server-provided rate-limit delays. */
+const postDiscordWebhook = async (payload: unknown, attempt = 1): Promise<void> => {
+    const response = await fetch(environment.WebhookUrl, {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+    });
+
+    if (response.ok) {
+        return;
+    }
+
+    const responseText = await response.text();
+    if (response.status !== 429 || attempt >= MAX_WEBHOOK_ATTEMPTS) {
+        throw new Error(`Discord returned ${response.status}: ${responseText.slice(0, 500)}`);
+    }
+
+    let retryAfterSeconds = Number(response.headers.get("Retry-After"));
+    try {
+        const body = JSON.parse(responseText) as { retry_after?: unknown };
+        if (typeof body.retry_after === "number") {
+            retryAfterSeconds = body.retry_after;
+        }
+    } catch {
+        // Fall back to the Retry-After header when Discord does not return JSON.
+    }
+
+    const retryDelayMs = Number.isFinite(retryAfterSeconds)
+        ? Math.max(retryAfterSeconds, 0) * 1000
+        : 1000;
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    await postDiscordWebhook(payload, attempt + 1);
+};
 
 /** Converts the Reddit HTML excerpt into a Discord-safe description. */
 const extractDescription = (item: FeedItem): string | undefined => {
@@ -192,14 +200,12 @@ const sendWebhook = async (item: FeedItem): Promise<void> => {
         return;
     }
 
-    const embed = new MessageBuilder();
-    embed
-        .setTitle(item.title.slice(0, 256))
-        .setURL(item.link)
-        .setColor("#FF4500")
-        .setDescription(description)
-        .setFooter(
-            `${item.author ?? "Unknown author"} | ${new Date().toLocaleString("en-US", {
+    const embed = {
+        color: DISCORD_EMBED_COLOR,
+        description,
+        footer: {
+            icon_url: environment.EmbedAuthorImageUrl,
+            text: `${item.author ?? "Unknown author"} | ${new Date().toLocaleString("en-US", {
                 day: "numeric",
                 hour: "numeric",
                 hour12: true,
@@ -207,14 +213,19 @@ const sendWebhook = async (item: FeedItem): Promise<void> => {
                 month: "long",
                 year: "numeric",
             })}`,
-            environment.EmbedAuthorImageUrl
-        );
+        },
+        thumbnail: item.image?.url ? { url: item.image.url } : undefined,
+        title: item.title.slice(0, 256),
+        url: item.link,
+    };
 
-    if (item.image?.url) {
-        embed.setThumbnail(item.image.url);
-    }
+    const payload = {
+        avatar_url: environment.WebhookAvatar,
+        embeds: [embed],
+        username: environment.WebhookUsername,
+    };
 
-    await hook.send(embed);
+    await postDiscordWebhook(payload);
     log.ok(item.title);
 };
 
