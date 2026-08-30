@@ -10,14 +10,13 @@
     "url": "https://github.com/Valhalla-Development/RedditToDiscordNotifications/issues"
   },
   "scripts": {
-  "lint": "tsc --noEmit -p tsconfig.json && biome check --files-ignore-unknown=true --diagnostic-level=error --no-errors-on-unmatched src",
+    "lint": "tsc --noEmit -p tsconfig.json && biome check --files-ignore-unknown=true --diagnostic-level=error --no-errors-on-unmatched src",
     "lint:fix": "biome check --write --no-errors-on-unmatched --files-ignore-unknown=true src",
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "type-check": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "dotenv": "^17.4.2",
     "html-entities": "^2.6.0",
     "minimal-discord-webhook-node": "^1.0.1",
     "rss-feed-emitter": "^3.2.4"

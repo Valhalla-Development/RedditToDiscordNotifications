@@ -1,4 +1,3 @@
-import "dotenv/config";
 import { decode } from "html-entities";
 // @ts-expect-error The package does not expose its bundled declarations through `exports`.
 import webhookPackage from "minimal-discord-webhook-node";
